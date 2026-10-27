@@ -25,7 +25,10 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.10"
-    MARKETING_VERSION: "0.1.0"
+    # 版本号真源是仓库根的 VERSION 文件。CI 在 xcodebuild 命令行上传
+    # MARKETING_VERSION 覆盖这里的值（build-ios.yml 的 Archive 步骤），
+    # 所以这一行只是本地直接 xcodegen generate + Xcode 构建时的兜底。
+    MARKETING_VERSION: "0.20.0"
     CURRENT_PROJECT_VERSION: "1"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1,2"

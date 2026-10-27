@@ -3,6 +3,15 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// 版本号真源在仓库根的 VERSION 文件。以前 versionName 写死在这里、iOS 的
+// MARKETING_VERSION 又是另一个数、提交信息里的版本号还是第三个——三处各说各话，
+// Release 也就没法按版本归档。现在安卓/iOS/CI 都读同一个文件。
+val repoVersion: String = rootProject.file("../VERSION")
+    .takeIf { it.isFile }
+    ?.readText()?.trim()
+    ?.takeIf { it.isNotEmpty() }
+    ?: "0.0.0"
+
 android {
     namespace = "online.timefiles.vantaloom"
     compileSdk = 34
@@ -21,7 +30,7 @@ android {
         // CI only overrides versionCode so every APK remains upgradable. Keep
         // versionName tied to the product release instead of inventing a build suffix.
         versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
-        versionName = "0.16.63"
+        versionName = repoVersion
 
         // The gomobile AAR ships a per-ABI .so; the CI binds android/arm64 only.
         ndk {

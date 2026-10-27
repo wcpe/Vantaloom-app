@@ -16,6 +16,12 @@ android/captures/
 android/app/libs/*.aar
 android/app/libs/*-sources.jar
 
+# Compiled native binaries are fetched from a pinned Release asset at build time
+# (URL + sha256 live in jniLibs.lock) — never commit them. Each release would add
+# another ~82MB blob that git cannot delta-compress, which is exactly how this
+# repo's .git grew to 734MB. See the "Fetch libvantaloom.so" step in build-apk.yml.
+android/app/src/main/jniLibs/
+
 # The compiled web export is staged into app assets by CI (source of truth: web/)
 android/app/src/main/assets/*
 !android/app/src/main/assets/README.md

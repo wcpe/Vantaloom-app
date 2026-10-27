@@ -1,0 +1,6 @@
+{
+  "url": "https://github.com/wcpe/Vantaloom-app/releases/download/so-build-f157059/libvantaloom.so",
+  "sha256": "ae717f489459fc14e4ecbed659a3f6d4507464d21e4b23738e65fb5a0f50dec7",
+  "size": 85393704,
+  "note": "libvantaloom.so 是私仓 apps/api 的 Go 交叉编译产物，本仓没有它的源码，所以不入库、改为从 Release 资产分发。更新二进制时：上传新的 Release 资产，然后把上面的 url 和 sha256 一起改掉。CI 会校验 sha256，不匹配就拒绝构建。"
+}

@@ -108,6 +108,28 @@ jobs:
       - name: Test the WebView bridge contract
         run: node --test android/app/src/test/js/bridge-shim.test.mjs
 
+      # ── libvantaloom.so：私仓编译产物，从 Release 资产取，不入库 ──
+      # 源码是私仓的 apps/api，本仓没有它的构建步骤，所以这个 82MB 的二进制
+      # 曾经只能整份提交进 git —— 65 个版本、547MB 的 pack，占了仓库 75%。
+      # 改成和 ios/node/xcframework.lock 一样的做法：URL + sha256 钉在 lock 里，
+      # 构建时下载并校验。更新二进制 = 传一份新 Release 资产 + 改 lock 两行。
+      - name: Fetch libvantaloom.so from the pinned Release asset
+        run: |
+          set -euo pipefail
+          LOCK="android/app/src/main/jniLibs.lock"
+          JNI="android/app/src/main/jniLibs/arm64-v8a"
+          URL="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["url"])' "$LOCK")"
+          SIZE="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["size"])' "$LOCK")"
+          SHA="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sha256"])' "$LOCK")"
+          mkdir -p "$JNI"
+          curl -fsSL --retry 3 --retry-delay 2 -o "$JNI/libvantaloom.so" "$URL"
+          # 先比大小（快、能立刻抓出截断），再比 sha256（准）。
+          ACTUAL_SIZE="$(stat -c%s "$JNI/libvantaloom.so")"
+          [ "$ACTUAL_SIZE" = "$SIZE" ] || {
+            echo "ERROR: libvantaloom.so 大小不符：期望 $SIZE，实际 $ACTUAL_SIZE" >&2; exit 1; }
+          echo "$SHA  $JNI/libvantaloom.so" | sha256sum -c -
+          echo "libvantaloom.so 校验通过 ($(du -h "$JNI/libvantaloom.so" | cut -f1))"
+
       - name: Stage the proot sandbox kernel into jniLibs
         run: |
           set -euo pipefail
@@ -339,21 +361,32 @@ jobs:
           path: dist/*.apk
           if-no-files-found: error
 
-      - name: Publish APK to a GitHub Release (permanent download)
+      # ── 一个版本一个 Release：APK 与 IPA 是同一 Release 下的不同产物 ──
+      # 版本号以 versionName 为唯一真源（release vX.Y.Z 与它对齐）。Android 与 iOS
+      # 两条流水线都往 `vX.Y.Z` 这**一个** Release 追加资产：先到的那条建 Release，
+      # 后到的用 `gh release upload --clobber` 追加，重复构建则原地替换，不会像
+      # 以前那样每次 build 都堆一个新 tag（apk-build249、ios-build19……）。
+      # 二进制文件名带 build 号与短 SHA，便于回查是哪次构建产的。
+      - name: Publish APK to the version Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          SHA="$(git rev-parse --short HEAD)"
-          TAG="apk-build${GITHUB_RUN_NUMBER}-${SHA}"
           APK="dist/${APK_NAME}"
-          # 版本号从 APK 自己报的那个真源现取，别在这里再写一份镜像——
-          # 上一份写死的 "0.14.33" 从 0.14.33 一路挂到了 0.16.63。
-          VER="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android/app/build.gradle.kts | head -1)"
-          if [ -n "$VER" ]; then VERLINE="Vantaloom $VER Android local-first client."; else VERLINE="Vantaloom Android local-first client."; fi
-          gh release create "$TAG" "$APK" \
-            --target "$GITHUB_SHA" \
-            --title "Vantaloom Android · build ${GITHUB_RUN_NUMBER} (${SHA})" \
-            --notes "${VERLINE} The on-device agent shell runs inside a real Debian-family Linux sandbox (proot + a rootfs downloaded on first use): apt/pip/git/compilers all work. Signed with the stable project release key for in-place upgrades." \
-            --latest
-          echo "Released $TAG → $(basename "$APK")"
+          # 版本号真源是仓库根的 VERSION 文件（gradle 的 versionName 也从它读）。
+          VER="$(tr -d '[:space:]' < VERSION)"
+          if [ -z "$VER" ]; then echo "ERROR: VERSION 文件为空"; exit 1; fi
+          TAG="v${VER}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Release 已存在（iOS 先建了，或本版本重跑）：追加/覆盖安卓资产。
+            gh release upload "$TAG" "$APK" --clobber
+            echo "Appended APK to existing release $TAG"
+          else
+            gh release create "$TAG" "$APK" \
+              --target "$GITHUB_SHA" \
+              --title "Vantaloom ${VER}" \
+              --notes "Vantaloom ${VER} —— Android APK（已签名，可直接覆盖升级）+ iOS 无签名 IPA（需自行重签）。" \
+              --latest
+            echo "Created release $TAG → $(basename "$APK")"
+          fi
+

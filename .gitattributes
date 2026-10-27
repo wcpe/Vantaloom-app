@@ -1,1 +1,10 @@
 *.patch -whitespace
+
+# Native binaries are opaque: diffing or 3-way merging them is pointless, and
+# git treats them as text without this. (They are gitignored and delivered via
+# Release assets, so this only guards against accidental `git add -f`.)
+*.so  binary -diff -merge -text
+*.a   binary -diff -merge -text
+*.aar binary -diff -merge -text
+*.apk binary -diff -merge -text
+*.ipa binary -diff -merge -text
