@@ -17,17 +17,21 @@
 
 name: Build iOS
 
+# 触发方式与 build-apk.yml 一致：维护者发布 vX.Y.Z Release（内含 web.tar.zst
+# 产物）即开始构建，成品 IPA 传回同一个 Release。详见 build-apk.yml 顶部说明。
 on:
-  push:
-    branches: [main]
-    paths:
-      - "ios/**"
-      - "web/**"
-      - ".github/workflows/build-ios.yml"
+  release:
+    # 只接 published：本 workflow 会往同一 Release 上传 IPA，若接 edited 会自触发。
+    types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "已有 Release 的 tag（例如 v0.21.0），手动补建产物时用"
+        required: true
+        type: string
 
 concurrency:
-  group: build-ios-${{ github.ref }}
+  group: build-ios-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: true
 
 permissions:
@@ -65,19 +69,38 @@ jobs:
           fi
           xcodegen --version
 
-      # ── 前端：与安卓同一纪律——只进编译产物，剔 source map，断言 _next/ 在场 ──
-      - name: Stage web export into ios/web
+      # ── 前端产物从本 Release 的 web.tar.zst 解出 ──
+      # 本仓不再保存 web/（私仓产物，47MB × 每个版本）。做法与安卓完全一致。
+      - name: Download and unpack web export from this release
+        id: web
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          [ -n "$TAG" ] || { echo "::error::取不到 tag"; exit 1; }
+          VER="${TAG#v}"
+          echo "VANTALOOM_VERSION=$VER" >> "$GITHUB_ENV"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          gh release download "$TAG" --pattern web.tar.zst --dir "$RUNNER_TEMP" --clobber
           rm -rf web
           mkdir -p web
-          rsync -a --exclude '*.map' ../web/ web/
-          if [ ! -f web/index.html ]; then echo "::error::web/index.html 缺失——先同步前端编译产物"; exit 1; fi
+          tar --zstd -xf "$RUNNER_TEMP/web.tar.zst" -C web
+          # 归档可能带一层顶层目录，展开成 web/index.html。
+          if [ ! -f web/index.html ]; then
+            inner="$(find web -maxdepth 2 -name index.html -printf '%h' -quit)"
+            if [ -n "$inner" ] && [ "$inner" != "web" ]; then
+              shopt -s dotglob
+              mv "$inner"/* web/
+              rmdir "$inner" 2>/dev/null || true
+            fi
+          fi
+          [ -f web/index.html ] || { echo "::error::web.tar.zst 里找不到 index.html"; exit 1; }
           NEXT_COUNT="$(find web/_next -type f | wc -l | tr -d ' ')"
           if [ "$NEXT_COUNT" -lt 10 ]; then echo "::error::web/_next 只有 $NEXT_COUNT 个文件，前端导出不完整"; exit 1; fi
           LEAK="$(find web -type f \( -name '*.map' -o -name '*.ts' -o -name '*.tsx' -o -name '*.jsx' \) | head -n 20 || true)"
           if [ -n "$LEAK" ]; then echo "::error::PUBLIC SOURCE LEAK BLOCKED:"; echo "$LEAK"; exit 1; fi
-          echo "web/ staged: $NEXT_COUNT files under _next/"
+          echo "web/ 解包完成: $NEXT_COUNT files under _next/"
 
       # ── 操控端节点：有 lock 就取，没有就出占位版 ──
       - name: Fetch controller node xcframework (optional)
@@ -104,14 +127,9 @@ jobs:
           VANTALOOM_IOS_NODE: ${{ steps.node.outputs.node }}
         run: |
           set -euo pipefail
-          # 版本号从仓库根的 VERSION 读，和安卓的 versionName 同一个真源；
-          # 真正生效是在下面 Archive 步骤用 xcodebuild 命令行覆盖。
-          VER="$(tr -d '[:space:]' < ../VERSION)"
-          if [ -z "$VER" ]; then echo "::error::VERSION 文件为空"; exit 1; fi
-          echo "VANTALOOM_VERSION=$VER" >> "$GITHUB_ENV"
-          echo "iOS versionName=$VER"
-          # 单一真源：xcodegen generate 成功后，把 VERSION 回写进生成的工程，
-          # 这样 MARKETING_VERSION 只可能有一个值，不会与 project.yml 漂移。
+          # VANTALOOM_VERSION 已在前面的解包步骤按 Release tag 设好；
+          # 真正生效是下面 Archive 用 xcodebuild 命令行覆盖 MARKETING_VERSION。
+          echo "iOS versionName=$VANTALOOM_VERSION"
           xcodegen generate --spec project.yml
           ls -la
 
@@ -207,29 +225,17 @@ jobs:
           echo '- 文件名带 `nonode` 的版本没有内置操控端节点，打开只会显示「操控端节点未打包」占位页；带节点的版本需要 `ios/node/xcframework.lock` 指向一份已发布的 VantaloomNode.xcframework。' >> notes.md
           cat notes.md
 
-      # ── 一个版本一个 Release：APK 与 IPA 是同一 Release 下的不同产物 ──
-      # 版本号真源是仓库根的 VERSION（安卓的 versionName 也从它读）。
-      # 这一步通常先于安卓构建完成，所以由它创建 `vX.Y.Z`；安卓那边随后
-      # 用 `gh release upload` 追加 APK。反过来也成立：不论谁先跑完，
-      # 后到的都会追加到同一个 Release，不会各开一个 tag。
-      # --latest 保持 true：版本 Release 就是仓库的 Latest。
-      - name: Publish to a GitHub Release
+      # ── 把 IPA 传回触发本次构建的那个 Release ──
+      # 与安卓同一处：tag 就是维护者发布的 vX.Y.Z，不新建 Release。
+      - name: Upload IPA back to the triggering release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ -z "$(ls -A dist 2>/dev/null)" ]; then echo "ERROR: no IPA to release"; exit 1; fi
-          VER="$(tr -d '[:space:]' < ../VERSION)"
-          if [ -z "$VER" ]; then echo "::error::VERSION 文件为空"; exit 1; fi
-          TAG="v${VER}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
-            echo "Appended IPA to existing release $TAG"
-          else
-            gh release create "$TAG" dist/* \
-              --title "Vantaloom ${VER}" \
-              --notes-file notes.md \
-              --latest
-            echo "Created release $TAG"
-          fi
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          [ -n "$TAG" ] || { echo "::error::取不到 tag"; exit 1; }
+          if [ -z "$(ls -A dist 2>/dev/null)" ]; then echo "::error::没有 IPA 可上传"; exit 1; fi
+          gh release upload "$TAG" dist/* --clobber
+          echo "已上传 IPA 到 Release $TAG"
+          gh release view "$TAG" --json url --jq '.url'
 

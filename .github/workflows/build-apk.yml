@@ -1,29 +1,39 @@
 name: Build Android APK
 
+# ── 触发方式：发布一个 Release ──
+# 本仓不再保存 web/ 与 libvantaloom.so（那是私仓的编译产物，每个版本几十 MB，
+# 二进制无法 delta 压缩，曾把 .git 撑到 734MB）。改为：
+#   1. 维护者在 GitHub 上建 draft Release（tag = vX.Y.Z）
+#   2. 往 draft 里上传产物：web.tar.zst + libvantaloom.so
+#   3. 点 Publish —— 这一步就是"开始构建"的信号
+#   4. CI 从**同一个 Release** 下载产物，构建 APK/IPA，再把成品传回这个 Release
+# 最后 vX.Y.Z 一个 Release 里同时有产物与成品，版本号只有一个真源（tag）。
+#
+# 为什么不是 push 触发：产物不在 git 里了，push 没有可比对的变化；而"发布
+# Release"本身就是维护者明确的放行信号，比任何路径过滤都准确。
 on:
-  push:
-    branches: [main]
-    paths:
-      - "android/**"
-      - "mobile-src/**"
-      - "web/**"
-      - ".github/workflows/build-apk.yml"
-      - ".github/scripts/**"
+  release:
+    # 只在"发布"那一刻触发一次。刻意不接 edited:  CI 会往同一个 Release 上传
+    # APK，若接 edited 就会自触发成死循环。
+    types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "已有 Release 的 tag（例如 v0.21.0），手动补建产物时用"
+        required: true
+        type: string
 
 concurrency:
-  group: build-apk-${{ github.ref }}
+  group: build-apk-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: true
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    # No native language runtimes are compiled anymore (0.14.33): the on-device
-    # Linux sandbox uses a precompiled proot + a rootfs downloaded on first use,
-    # so this job is just gomobile bind + web staging + Gradle + signing.
+    # 产物已在 Release 里，这条流水线只剩 gomobile bind + 解包 web + Gradle。
     timeout-minutes: 45
     permissions:
-      contents: write # tag + create a release and upload the APK as a permanent asset
+      contents: write # 把 APK 传回本 Release
     env:
       # arm64 covers essentially every real phone.
       GOMOBILE_TARGET: android/arm64
@@ -108,27 +118,68 @@ jobs:
       - name: Test the WebView bridge contract
         run: node --test android/app/src/test/js/bridge-shim.test.mjs
 
-      # ── libvantaloom.so：私仓编译产物，从 Release 资产取，不入库 ──
-      # 源码是私仓的 apps/api，本仓没有它的构建步骤，所以这个 82MB 的二进制
-      # 曾经只能整份提交进 git —— 65 个版本、547MB 的 pack，占了仓库 75%。
-      # 改成和 ios/node/xcframework.lock 一样的做法：URL + sha256 钉在 lock 里，
-      # 构建时下载并校验。更新二进制 = 传一份新 Release 资产 + 改 lock 两行。
-      - name: Fetch libvantaloom.so from the pinned Release asset
+      # ── 从本 Release 下载私仓产物 ──
+      # 维护者发布 Release 时上传两个资产：
+      #   libvantaloom.so   私仓 apps/api 的 Go 交叉编译产物（约 82MB）
+      #   web.tar.zst       私仓 apps/vantaloom 的 Next.js 静态导出（约 47MB → 压缩后更小）
+      # 两者都不进 git。版本号即 Release tag，不再需要单独的 lock/VERSION 文件。
+      - name: Verify the release carries the required artifacts
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          LOCK="android/app/src/main/jniLibs.lock"
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          [ -n "$TAG" ] || { echo "ERROR: 取不到 tag"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # 版本号 = tag 去掉前缀 v（v0.21.0 → 0.21.0）。gradle 的 versionName 用它。
+          VER="${TAG#v}"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "VANTALOOM_VERSION=$VER" >> "$GITHUB_ENV"
+          # 缺哪个就明确报出来，别等到 gradle 阶段才报一句看不懂的错。
+          names="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          echo "Release $TAG 资产："; printf '%s\n' "$names"
+          for need in libvantaloom.so web.tar.zst; do
+            printf '%s\n' "$names" | grep -Fxq "$need" || {
+              echo "ERROR: Release $TAG 缺少资产 $need（发布 Release 前必须先上传它）" >&2; exit 1; }
+          done
+
+      - name: Download libvantaloom.so from this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.rel.outputs.tag }}"
           JNI="android/app/src/main/jniLibs/arm64-v8a"
-          URL="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["url"])' "$LOCK")"
-          SIZE="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["size"])' "$LOCK")"
-          SHA="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sha256"])' "$LOCK")"
           mkdir -p "$JNI"
-          curl -fsSL --retry 3 --retry-delay 2 -o "$JNI/libvantaloom.so" "$URL"
-          # 先比大小（快、能立刻抓出截断），再比 sha256（准）。
-          ACTUAL_SIZE="$(stat -c%s "$JNI/libvantaloom.so")"
-          [ "$ACTUAL_SIZE" = "$SIZE" ] || {
-            echo "ERROR: libvantaloom.so 大小不符：期望 $SIZE，实际 $ACTUAL_SIZE" >&2; exit 1; }
-          echo "$SHA  $JNI/libvantaloom.so" | sha256sum -c -
-          echo "libvantaloom.so 校验通过 ($(du -h "$JNI/libvantaloom.so" | cut -f1))"
+          gh release download "$TAG" --pattern libvantaloom.so --dir "$JNI" --clobber
+          test -s "$JNI/libvantaloom.so" || { echo "ERROR: 下载后文件为空" >&2; exit 1; }
+          # 打印 sha256 到日志：想核对某次构建用的是哪个二进制，查这里即可。
+          echo "libvantaloom.so sha256: $(sha256sum "$JNI/libvantaloom.so" | cut -d' ' -f1)"
+          echo "libvantaloom.so 大小: $(du -h "$JNI/libvantaloom.so" | cut -f1)"
+
+      - name: Download and unpack web export from this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.rel.outputs.tag }}"
+          gh release download "$TAG" --pattern web.tar.zst --dir "$RUNNER_TEMP" --clobber
+          rm -rf web
+          mkdir -p web
+          # --zstd 必须显式给：runner 的 tar 不一定默认认 zst。
+          tar --zstd -xf "$RUNNER_TEMP/web.tar.zst" -C web
+          # 允许归档里带一层顶层目录（web/... 或 out/...），展开成 web/index.html。
+          if [ ! -f web/index.html ]; then
+            inner="$(find web -maxdepth 2 -name index.html -printf '%h' -quit)"
+            if [ -n "$inner" ] && [ "$inner" != "web" ]; then
+              shopt -s dotglob
+              mv "$inner"/* web/
+              rmdir "$inner" 2>/dev/null || true
+            fi
+          fi
+          [ -f web/index.html ] || { echo "ERROR: web.tar.zst 里找不到 index.html" >&2; exit 1; }
+          echo "web/ 解包完成：$(find web -type f | wc -l) 个文件，$(du -sh web | cut -f1)"
 
       - name: Stage the proot sandbox kernel into jniLibs
         run: |
@@ -249,11 +300,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -f web/index.html ]; then
-            echo "ERROR: web/ export missing (expected the committed Next.js export)"; exit 1
+            echo "ERROR: web/ 解包后没有 index.html" >&2; exit 1
           fi
+          # 产物门禁：Release 里的 web.tar.zst 由私仓构建，绝不能夹带源码或
+          # sourcemap（.map 的 sourcesContent 会把专有源码整份带出来）。
           forbidden_web_files="$(find web -type f \( -name '*.map' -o -name '*.ts' -o -name '*.tsx' -o -name '*.jsx' \) -print)"
           if [ -n "$forbidden_web_files" ]; then
-            echo "ERROR: public web bundle contains source/sourcemap files:" >&2
+            echo "ERROR: web 产物包含源码/sourcemap，拒绝构建：" >&2
             printf '%s\n' "$forbidden_web_files" >&2
             exit 1
           fi
@@ -277,7 +330,8 @@ jobs:
         run: |
           set -euo pipefail
           gradle :app:assembleRelease --no-daemon --stacktrace \
-            -PversionCode="${GITHUB_RUN_NUMBER}"
+            -PversionCode="${GITHUB_RUN_NUMBER}" \
+            -PversionName="${VANTALOOM_VERSION}"
 
       - name: Assert the web bundle survived AAPT (assets/_next present)
         run: |
@@ -361,32 +415,19 @@ jobs:
           path: dist/*.apk
           if-no-files-found: error
 
-      # ── 一个版本一个 Release：APK 与 IPA 是同一 Release 下的不同产物 ──
-      # 版本号以 versionName 为唯一真源（release vX.Y.Z 与它对齐）。Android 与 iOS
-      # 两条流水线都往 `vX.Y.Z` 这**一个** Release 追加资产：先到的那条建 Release，
-      # 后到的用 `gh release upload --clobber` 追加，重复构建则原地替换，不会像
-      # 以前那样每次 build 都堆一个新 tag（apk-build249、ios-build19……）。
-      # 二进制文件名带 build 号与短 SHA，便于回查是哪次构建产的。
-      - name: Publish APK to the version Release
+      # ── 把 APK 传回触发本次构建的那个 Release ──
+      # 不再新建 Release：tag 就是维护者发布时创建的那个 vX.Y.Z。iOS 构建同样
+      # 往这里追加，所以一个版本最终只有一处，里面既有产物也有双平台成品。
+      # 传资产不会再次触发本 workflow（只监听 published），不会递归。
+      - name: Upload APK back to the triggering release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          TAG="${{ steps.rel.outputs.tag }}"
           APK="dist/${APK_NAME}"
-          # 版本号真源是仓库根的 VERSION 文件（gradle 的 versionName 也从它读）。
-          VER="$(tr -d '[:space:]' < VERSION)"
-          if [ -z "$VER" ]; then echo "ERROR: VERSION 文件为空"; exit 1; fi
-          TAG="v${VER}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            # Release 已存在（iOS 先建了，或本版本重跑）：追加/覆盖安卓资产。
-            gh release upload "$TAG" "$APK" --clobber
-            echo "Appended APK to existing release $TAG"
-          else
-            gh release create "$TAG" "$APK" \
-              --target "$GITHUB_SHA" \
-              --title "Vantaloom ${VER}" \
-              --notes "Vantaloom ${VER} —— Android APK（已签名，可直接覆盖升级）+ iOS 无签名 IPA（需自行重签）。" \
-              --latest
-            echo "Created release $TAG → $(basename "$APK")"
-          fi
+          ls -la dist
+          gh release upload "$TAG" "$APK" --clobber
+          echo "已上传 $APK 到 Release $TAG"
+          gh release view "$TAG" --json url --jq '.url'
 

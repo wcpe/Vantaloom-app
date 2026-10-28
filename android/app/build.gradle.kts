@@ -3,14 +3,12 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// 版本号真源在仓库根的 VERSION 文件。以前 versionName 写死在这里、iOS 的
-// MARKETING_VERSION 又是另一个数、提交信息里的版本号还是第三个——三处各说各话，
-// Release 也就没法按版本归档。现在安卓/iOS/CI 都读同一个文件。
-val repoVersion: String = rootProject.file("../VERSION")
-    .takeIf { it.isFile }
-    ?.readText()?.trim()
-    ?.takeIf { it.isNotEmpty() }
-    ?: "0.0.0"
+// 版本号来自 CI 传入的 -PversionName（取自触发构建的 Release tag，去掉前缀 v）。
+// 本仓不再保存 web/ 与 libvantaloom.so，产物随 Release 分发，tag 就是版本的唯一
+// 真源；本地直接 assemble 时没有该参数，退化成 0.0.0-dev。
+val ciVersionName: String = (project.findProperty("versionName") as String?)
+    ?.takeIf { it.isNotBlank() }
+    ?: "0.0.0-dev"
 
 android {
     namespace = "online.timefiles.vantaloom"
@@ -27,10 +25,9 @@ android {
         // self-distributed via GitHub Releases (not Play), so the low targetSdk
         // is cost-free; it also simplifies notifications/FGS/storage behavior.
         targetSdk = 28
-        // CI only overrides versionCode so every APK remains upgradable. Keep
-        // versionName tied to the product release instead of inventing a build suffix.
+        // CI 同时覆盖 versionCode（保证每次都能覆盖升级）与 versionName（取自 tag）。
         versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
-        versionName = repoVersion
+        versionName = ciVersionName
 
         // The gomobile AAR ships a per-ABI .so; the CI binds android/arm64 only.
         ndk {

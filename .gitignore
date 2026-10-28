@@ -16,18 +16,24 @@ android/captures/
 android/app/libs/*.aar
 android/app/libs/*-sources.jar
 
-# Compiled native binaries are fetched from a pinned Release asset at build time
-# (URL + sha256 live in jniLibs.lock) — never commit them. Each release would add
-# another ~82MB blob that git cannot delta-compress, which is exactly how this
-# repo's .git grew to 734MB. See the "Fetch libvantaloom.so" step in build-apk.yml.
+# Compiled native binaries are fetched from a Release asset at build time —
+# never commit them. Each release would add another ~82MB blob that git cannot
+# delta-compress, which is exactly how this repo's .git grew to 734MB.
 android/app/src/main/jniLibs/
 
-# The compiled web export is staged into app assets by CI (source of truth: web/)
+# The compiled Next.js export is the private repo's build product. It ships as
+# the `web.tar.zst` asset of the same Release that triggers the CI build, and is
+# unpacked during the workflow. ~47MB per release, and Next.js chunk filenames
+# carry a content hash, so every export added ~77% brand-new blobs to history.
+web/
+
+# The compiled web export is staged into app assets by CI at build time.
 android/app/src/main/assets/*
 !android/app/src/main/assets/README.md
 
-# Public web exports are compiled assets only: source maps may embed sourcesContent,
-# expose proprietary source, and are rejected by the APK CI gate. Never force-add.
+# Belt and braces: if a web/ copy ever reappears locally (e.g. unpacked by hand
+# while debugging CI), never let source maps or TS/JSX sources get committed.
+# .map files embed sourcesContent and would leak the proprietary frontend source.
 web/**/*.map
 web/**/*.ts
 web/**/*.tsx
