@@ -182,34 +182,14 @@ jobs:
           ( cd build && zip -qr "Vantaloom-ios-${SUFFIX}.ipa" Payload )
           ls -la build/*.ipa
 
-      - name: Upload IPA artifact
-        uses: actions/cache/save@v4
-        with:
-          key: ios-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ios/build/*.ipa
-
-  release:
-    name: Publish GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download build artifacts
-        uses: actions/cache/restore@v4
-        with:
-          key: ios-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/ios-unsigned
-          fail-on-cache-miss: true
-
+      # Release：与 build 合并为同一 job，IPA 走本 job 工作区——同 run
+      # 跨 job 的 actions/cache 传递实测不可靠，产物不越 job 边界。
       - name: Collect + stamp
         run: |
           set -euo pipefail
           mkdir -p dist
           SHA="$(git rev-parse --short HEAD)"
-          for f in $(find artifacts -name '*.ipa'); do
+          for f in $(find ios/build -name '*.ipa'); do
             base="$(basename "$f" .ipa)"
             cp "$f" "dist/${base}-build${GITHUB_RUN_NUMBER}-${SHA}.ipa"
           done
