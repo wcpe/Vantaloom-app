@@ -183,11 +183,10 @@ jobs:
           ls -la build/*.ipa
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/cache/save@v4
         with:
-          name: ios-unsigned
+          key: ios-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
           path: ios/build/*.ipa
-          if-no-files-found: error
 
   release:
     name: Publish GitHub Release
@@ -199,9 +198,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/cache/restore@v4
         with:
-          path: artifacts
+          key: ios-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ios-unsigned
+          fail-on-cache-miss: true
 
       - name: Collect + stamp
         run: |

@@ -408,12 +408,6 @@ jobs:
           echo "APK_NAME=$NAME" >> "$GITHUB_ENV"
           echo "Signed: dist/$NAME"; ls -la dist
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: vantaloom-android-apk
-          path: dist/*.apk
-          if-no-files-found: error
 
       # ── 把 APK 传回触发本次构建的那个 Release ──
       # 不再新建 Release：tag 就是维护者发布时创建的那个 vX.Y.Z。iOS 构建同样
